@@ -5,13 +5,16 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useTranslation } from "react-i18next";
 import { NavLink, Route, Routes } from "react-router-dom";
-import { useSaveEvidenceMutation, useGetEvidenceQuery } from "./store/api";
+import { useGetCourtQuery, useSaveCourtMutation } from "./store/api";
 import { useAppDispatch, useAppSelector } from "./store/hooks";
-import { addObjection, completeEvidence, initialize, reorder, resolveObjection, restore, selectEvidence, setMode, setOnline, setPhase, showEvidence, snapshot, tick, toggleSensitive } from "./store/courtSlice";
+import { addObjection, completeEvidence, editEvidence, initialize, reorder, resolveObjection, restore, selectEvidence, setMode, setOnline, setPhase, showEvidence, snapshot, tick, toggleSensitive, simulateJudgeConfirm } from "./store/courtSlice";
 import type { Evidence, Party, SessionPhase } from "./types";
+import MergeModal from "./components/MergeModal";
 
 const objectionSchema = z.object({ ground: z.string().min(2), explanation: z.string().min(6) });
 type ObjectionForm = z.infer<typeof objectionSchema>;
+const editSchema = z.object({ title: z.string().min(1), note: z.string() });
+type EditForm = z.infer<typeof editSchema>;
 
 function formatTime(seconds: number) { return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`; }
 
@@ -20,27 +23,52 @@ function CourtControl() {
   const state = useAppSelector((root) => root.court);
   const [mode, setLocalMode] = useState<"控制" | "预览">("控制");
   const [objectionOpen, setObjectionOpen] = useState(false);
+  const [editing, setEditing] = useState<Evidence | null>(null);
   const current = state.evidence.find((item) => item.id === state.session.currentEvidenceId);
   const pending = state.objections.filter((item) => item.status === "待裁定");
   const { control, handleSubmit, reset } = useForm<ObjectionForm>({ resolver: zodResolver(objectionSchema), defaultValues: { ground: "关联性异议", explanation: "" } });
+  const editForm = useForm<EditForm>({ resolver: zodResolver(editSchema), defaultValues: { title: "", note: "" } });
 
   useEffect(() => { const timer = window.setInterval(() => dispatch(tick()), 1000); return () => window.clearInterval(timer); }, [dispatch]);
   const submitObjection = (values: ObjectionForm) => { if (!current) return; dispatch(addObjection({ evidenceId: current.id, ...values })); reset(); setObjectionOpen(false); Message.warning("异议已进入待裁定分支"); };
 
+  const stagedCount = Object.keys(state.stagedItems).length + (state.stagedOrder ? 1 : 0) + state.stagedObjections.length;
+  const hasPendingStaging = stagedCount > 0;
+  // 合并完成前（离线或回网未合并）公开屏不得出现敏感备注
+  const revealed = state.online && !hasPendingStaging;
+
+  const openEdit = (item: Evidence) => { setEditing(item); editForm.reset({ title: item.title, note: item.note }); };
+  const submitEdit = (values: EditForm) => { if (!editing) return; dispatch(editEvidence({ id: editing.id, ...values })); setEditing(null); Message.success("证据信息已更新"); };
+
   return <div className="court-grid">
-    <Card className="operator" title="证据操作台" extra={<Space><Tag color={state.online ? "green" : "red"}>{state.online ? "本地审计在线" : "离线恢复模式"}</Tag><Button size="small" onClick={() => dispatch(snapshot("手动存档"))}>保存快照</Button></Space>}>
+    <MergeModal />
+    <Card className="operator" title="证据操作台" extra={<Space>
+      {hasPendingStaging && <Tag color="orange">暂存 {stagedCount} 项</Tag>}
+      <Tag color={state.online ? "green" : "red"}>{state.online ? "本地审计在线" : "离线恢复模式"}</Tag>
+      <Button size="small" onClick={() => dispatch(snapshot("手动存档"))}>保存快照</Button>
+    </Space>}>
+      {!state.online && <div className="offline-banner">离线中：证据排序、遮罩、状态与异议改动进入暂存区，回网后按字段与目录合并，不影响法官已确认的进度。</div>}
       <div className="evidence-list">{state.evidence.map((item, index) => <article key={item.id} draggable onDragStart={(event) => event.dataTransfer.setData("text/plain", String(index))} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { const from = Number(event.dataTransfer.getData("text/plain")); const items = [...state.evidence]; const [moved] = items.splice(from, 1); items.splice(index, 0, moved); dispatch(reorder(items)); }} className={current?.id === item.id ? "active" : ""}>
-        <span>{index + 1}</span><div><b>{item.exhibitNo} · {item.title}</b><small>{item.type} · {item.presenter} · {item.duration}分钟</small></div><Tag color={item.status === "已展示" ? "green" : item.status === "展示中" ? "orange" : "gray"}>{item.status}</Tag><Button size="mini" onClick={() => dispatch(selectEvidence(item.id))}>选中</Button>
+        <span>{index + 1}</span><div><b>{item.exhibitNo} · {item.title}</b><small>{item.type} · {item.presenter} · {item.duration}分钟</small></div><Tag color={item.status === "已展示" ? "green" : item.status === "展示中" ? "orange" : "gray"}>{item.status}</Tag>
+        <Button size="mini" onClick={() => openEdit(item)}>编辑</Button>
+        <Button size="mini" onClick={() => dispatch(selectEvidence(item.id))}>选中</Button>
       </article>)}</div>
-      <div className="control-strip"><Button type="primary" onClick={() => dispatch(showEvidence())} disabled={!current}>开始展示</Button><Button onClick={() => dispatch(completeEvidence())} disabled={!current}>完成并切换下一条</Button><Button status="warning" onClick={() => setObjectionOpen(true)} disabled={!current}>提出异议</Button><Button onClick={() => dispatch(toggleSensitive(current?.id ?? ""))} disabled={!current}>{current?.sensitive ? "恢复敏感内容" : "隐藏敏感内容"}</Button></div>
+      <div className="control-strip">
+        <Button type="primary" onClick={() => dispatch(showEvidence())} disabled={!current}>开始展示</Button>
+        <Button onClick={() => dispatch(completeEvidence())} disabled={!current}>完成并切换下一条</Button>
+        <Button status="warning" onClick={() => setObjectionOpen(true)} disabled={!current}>提出异议</Button>
+        <Button onClick={() => dispatch(toggleSensitive(current?.id ?? ""))} disabled={!current}>{current?.sensitive ? "恢复敏感内容" : "隐藏敏感内容"}</Button>
+        {!state.online && <Button status="danger" onClick={() => dispatch(simulateJudgeConfirm())}>模拟法官确认进度</Button>}
+      </div>
     </Card>
     <div className="side-stack">
-      <Card title="公开屏预览" extra={<Select size="small" value={mode} onChange={(value) => { setLocalMode(value as "控制" | "预览"); dispatch(setMode(value === "预览" ? "公开屏预览" : "庭审控制")); }} options={[{value:"控制",label:"控制者视图"},{value:"预览",label:"公开屏"}]} />} className="preview-card">
-        <div className="public-screen">{mode === "预览" ? <><small>公开展示</small><h2>{current?.exhibitNo ?? "暂无证据"}</h2><h3>{current?.title ?? "庭审进行中"}</h3>{current?.sensitive ? <div className="redaction"><b>敏感内容已遮罩</b><p>该证据包含不适宜公开的信息，庭审结束后统一入卷。</p></div> : <p>{current?.note}</p>}<footer>计时 {formatTime(state.session.timerSeconds)} · {state.session.phase}</footer></> : <><small>控制者私有视图</small><h2>敏感内容可预览</h2><p>{current?.sensitive ? "此证据将在公开屏遮罩客户名称，控制者可查看完整备注。" : "当前证据可完整公开。"}</p><Tag color="red">操作端专属</Tag></>}</div>
+      <Card title="公开屏预览" extra={<Select size="small" value={mode} onChange={(value) => { setLocalMode(value as "控制" | "预览"); dispatch(setMode(value === "预览" ? "公开屏预览" : "庭审控制")); }} options={[{ value: "控制", label: "控制者视图" }, { value: "预览", label: "公开屏" }]} />} className="preview-card">
+        <div className="public-screen">{mode === "预览" ? <><small>公开展示</small><h2>{current?.exhibitNo ?? "暂无证据"}</h2><h3>{current?.title ?? "庭审进行中"}</h3>{current?.sensitive ? <div className="redaction"><b>敏感内容已遮罩</b><p>该证据包含不适宜公开的信息，庭审结束后统一入卷。</p></div> : revealed ? <p>{current?.note}</p> : <div className="redaction"><b>备注暂不显示</b><p>离线改动合并完成前，公开屏不展示备注内容。</p></div>}<footer>计时 {formatTime(state.session.timerSeconds)} · {state.session.phase}</footer></> : <><small>控制者私有视图</small><h2>敏感内容可预览</h2><p>{current?.sensitive ? "此证据将在公开屏遮罩客户名称，控制者可查看完整备注。" : "当前证据可完整公开。"}</p><Tag color="red">操作端专属</Tag></>}</div>
       </Card>
       <Card title="待审异议" extra={<Tag color="red">{pending.length}</Tag>}>{pending.map((item) => <div className="objection" key={item.id}><b>{item.ground}</b><p>{item.explanation}</p><Space><Button size="mini" status="success" onClick={() => dispatch(resolveObjection({ id: item.id, status: "支持" }))}>支持并跳过</Button><Button size="mini" onClick={() => dispatch(resolveObjection({ id: item.id, status: "驳回" }))}>驳回继续</Button></Space></div>)}{!pending.length && <p>当前没有待裁定异议。</p>}</Card>
     </div>
-    <Modal title="提出证据异议" visible={objectionOpen} onCancel={() => setObjectionOpen(false)} onOk={() => handleSubmit(submitObjection)()}><Form layout="vertical"><Form.Item label="异议类型"><Controller name="ground" control={control} render={({ field }) => <Select {...field} options={[{value:"关联性异议",label:"关联性异议"},{value:"真实性异议",label:"真实性异议"},{value:"合法性异议",label:"合法性异议"}]} />} /></Form.Item><Form.Item label="异议说明"><Controller name="explanation" control={control} render={({ field }) => <Input.TextArea {...field} placeholder="说明异议依据和希望法庭裁定的事项" />} /></Form.Item></Form></Modal>
+    <Modal title="提出证据异议" visible={objectionOpen} onCancel={() => setObjectionOpen(false)} onOk={() => handleSubmit(submitObjection)()}><Form layout="vertical"><Form.Item label="异议类型"><Controller name="ground" control={control} render={({ field }) => <Select {...field} options={[{ value: "关联性异议", label: "关联性异议" }, { value: "真实性异议", label: "真实性异议" }, { value: "合法性异议", label: "合法性异议" }]} />} /></Form.Item><Form.Item label="异议说明"><Controller name="explanation" control={control} render={({ field }) => <Input.TextArea {...field} placeholder="说明异议依据和希望法庭裁定的事项" />} /></Form.Item></Form></Modal>
+    <Modal title="编辑证据信息" visible={!!editing} onCancel={() => setEditing(null)} onOk={() => editForm.handleSubmit(submitEdit)()}><Form layout="vertical"><Form.Item label="证据名称"><Controller name="title" control={editForm.control} render={({ field }) => <Input {...field} />} /></Form.Item><Form.Item label="备注"><Controller name="note" control={editForm.control} render={({ field }) => <Input.TextArea {...field} placeholder="证据备注（含敏感信息请谨慎填写）" />} /></Form.Item></Form></Modal>
     <Card title="庭审阶段" className="phase-card"><Radio.Group value={state.session.phase} onChange={(value) => dispatch(setPhase(value as SessionPhase))}><Radio value="开庭">开庭</Radio><Radio value="举证">举证</Radio><Radio value="质证">质证</Radio><Radio value="休庭">休庭</Radio><Radio value="结束">结束</Radio></Radio.Group></Card>
   </div>;
 }
@@ -54,17 +82,44 @@ function TimelinePage() {
 function EvidencePage() {
   const state = useAppSelector((root) => root.court);
   const dispatch = useAppDispatch();
-  return <Card title="证据目录与公开属性"><div className="catalog">{state.evidence.map((item) => <article key={item.id}><div><b>{item.exhibitNo} {item.title}</b><p>{item.note}</p></div><Tag>{item.type}</Tag><div className="switch-line"><span>公开屏敏感遮罩</span><Switch checked={item.sensitive} onChange={() => dispatch(toggleSensitive(item.id))} /></div></article>)}</div></Card>;
+  return <Card title="证据目录与公开属性"><div className="catalog">{state.evidence.map((item) => {
+    const staged = !!state.stagedItems[item.id];
+    return <article key={item.id}><div><b>{item.exhibitNo} {item.title}</b><p>{item.note}</p>{staged && <Tag color="orange">暂存已改</Tag>}</div><Tag>{item.type}</Tag><div className="switch-line"><span>公开屏敏感遮罩</span><Switch checked={item.sensitive} onChange={() => dispatch(toggleSensitive(item.id))} /></div></article>;
+  })}</div></Card>;
 }
 
 export default function App() {
   const dispatch = useAppDispatch();
   const state = useAppSelector((root) => root.court);
-  const { data = [] } = useGetEvidenceQuery();
-  const [save] = useSaveEvidenceMutation();
+  const { data } = useGetCourtQuery();
+  const [save] = useSaveCourtMutation();
   const { t, i18n } = useTranslation();
-  useEffect(() => { if (data.length) dispatch(initialize(data)); }, [data, dispatch]);
-  useEffect(() => { const timer = window.setTimeout(() => void save(state.evidence), 300); return () => window.clearTimeout(timer); }, [state.evidence, save]);
+  useEffect(() => { if (data) dispatch(initialize({ evidence: data.evidence, staging: data.staging })); }, [data, dispatch]);
+
+  const stagedCount = Object.keys(state.stagedItems).length + (state.stagedOrder ? 1 : 0) + state.stagedObjections.length;
+  const hasPendingStaging = stagedCount > 0;
+
+  useEffect(() => {
+    const blob = {
+      evidence: state.online && !hasPendingStaging ? state.evidence : (state.syncBase ?? state.evidence),
+      staging: !state.online || hasPendingStaging ? {
+        syncBase: state.syncBase ?? [],
+        serverCatalog: state.serverCatalog,
+        serverOrder: state.serverOrder,
+        serverOrderAt: state.serverOrderAt,
+        serverUpdatedAt: state.serverUpdatedAt,
+        syncObjections: state.syncObjections ?? [],
+        serverObjections: state.serverObjections,
+        stagedItems: state.stagedItems,
+        stagedOrder: state.stagedOrder,
+        stagedOrderAt: state.stagedOrderAt,
+        stagedObjections: state.stagedObjections
+      } : null
+    };
+    const timer = window.setTimeout(() => void save(blob), 400);
+    return () => window.clearTimeout(timer);
+  }, [state.evidence, state.online, state.mergeOpen, state.syncBase, state.serverCatalog, state.serverObjections, state.stagedItems, state.stagedOrder, state.stagedObjections, save, hasPendingStaging]);
+
   const metrics = useMemo(() => ({ shown: state.evidence.filter((item) => item.status === "已展示").length, sensitive: state.evidence.filter((item) => item.sensitive).length, objections: state.objections.length }), [state]);
   return <div className="shell"><aside><div className="brand"><b>COURT</b><span>庭审控制</span></div><nav><NavLink to="/">{t("control")}</NavLink><NavLink to="/evidence">证据目录</NavLink><NavLink to="/timeline">{t("timeline")}</NavLink></nav><Button onClick={() => void i18n.changeLanguage(i18n.language === "zh" ? "en" : "zh")}>{i18n.language === "zh" ? "EN" : "中文"}</Button></aside><main><header><div><small>案件号 2026-民初-1084 · 全流程审计开启</small><h1>{t("title")}</h1></div><div className="top-tools"><label>本地恢复 <Switch checked={!state.online} onChange={(value) => dispatch(setOnline(!value))} /></label><Tag color={state.online ? "green" : "orange"}>{state.online ? "协作同步" : "离线操作"}</Tag></div></header><section className="metrics"><Card><Statistic title="证据总数" value={state.evidence.length} /></Card><Card><Statistic title="已完成质证" value={metrics.shown} /></Card><Card><Statistic title="敏感证据" value={metrics.sensitive} /></Card><Card><Statistic title="异议记录" value={metrics.objections} /></Card></section><Routes><Route path="/" element={<CourtControl />} /><Route path="/evidence" element={<EvidencePage />} /><Route path="/timeline" element={<TimelinePage />} /></Routes></main></div>;
 }

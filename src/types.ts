@@ -21,6 +21,7 @@ export interface Objection {
   explanation: string;
   status: "待裁定" | "支持" | "驳回";
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface TimelineEntry {
@@ -36,4 +37,52 @@ export interface SessionState {
   currentEvidenceId: string | null;
   timerSeconds: number;
   operatorMode: "庭审控制" | "公开屏预览";
+}
+
+// ===== 离线暂存与按字段合并 =====
+
+/** 可离线编辑、参与合并的证据字段 */
+export type MergeField = "exhibitNo" | "title" | "type" | "duration" | "presenter" | "sensitive" | "status" | "note";
+
+export const FIELD_LABELS: Record<MergeField, string> = {
+  exhibitNo: "证据编号",
+  title: "证据名称",
+  type: "证据类型",
+  duration: "时长(分钟)",
+  presenter: "举证方",
+  sensitive: "敏感遮罩",
+  status: "质证状态",
+  note: "备注",
+};
+
+/** 暂存区中单项证据的离线改动：按字段记录最后改动时间与值 */
+export interface StagedItem {
+  evidenceId: string;
+  changes: Partial<Record<MergeField, { at: string; value: unknown }>>;
+}
+
+/** 合并比对中的一个字段级冲突 */
+export interface FieldConflict {
+  evidenceId: string;
+  field: MergeField;
+  stagedValue: unknown;
+  serverValue: unknown;
+  choice: "staged" | "server" | null;
+  locked: boolean;
+  lockReason?: string;
+}
+
+/** 持久化到本地的暂存快照（断网期间书记员的离线改动） */
+export interface PersistedStaging {
+  syncBase: Evidence[];
+  serverCatalog: Evidence[] | null;
+  serverOrder: string[] | null;
+  serverOrderAt: string | null;
+  serverUpdatedAt: string | null;
+  syncObjections: Objection[];
+  serverObjections: Objection[] | null;
+  stagedItems: Record<string, StagedItem>;
+  stagedOrder: string[] | null;
+  stagedOrderAt: string | null;
+  stagedObjections: Objection[];
 }

@@ -1,12 +1,36 @@
 import { createApi, fakeBaseQuery } from "@reduxjs/toolkit/query/react";
-import type { Evidence } from "../types";
+import type { Evidence, PersistedStaging } from "../types";
+
 const KEY = "pair-wise-yf-49/court";
+
+interface CourtBlob {
+  evidence: Evidence[];
+  staging: PersistedStaging | null;
+}
+
+function readBlob(): CourtBlob {
+  const raw = localStorage.getItem(KEY);
+  if (!raw) return { evidence: [], staging: null };
+  const parsed = JSON.parse(raw);
+  // 兼容旧格式：直接存 evidence 数组
+  if (Array.isArray(parsed)) return { evidence: parsed, staging: null };
+  return { evidence: parsed.evidence ?? [], staging: parsed.staging ?? null };
+}
+
 export const courtApi = createApi({
   reducerPath: "courtApi",
   baseQuery: fakeBaseQuery(),
   endpoints: (builder) => ({
-    getEvidence: builder.query<Evidence[], void>({ queryFn: async () => { const raw = localStorage.getItem(KEY); return { data: raw ? JSON.parse(raw).evidence : [] }; } }),
-    saveEvidence: builder.mutation<{ ok: true }, Evidence[]>({ queryFn: async (payload) => { const raw = localStorage.getItem(KEY); const current = raw ? JSON.parse(raw) : {}; localStorage.setItem(KEY, JSON.stringify({ ...current, evidence: payload })); return { data: { ok: true } }; } })
+    getCourt: builder.query<CourtBlob, void>({
+      queryFn: async () => ({ data: readBlob() })
+    }),
+    saveCourt: builder.mutation<{ ok: true }, CourtBlob>({
+      queryFn: async (payload) => {
+        localStorage.setItem(KEY, JSON.stringify(payload));
+        return { data: { ok: true } };
+      }
+    })
   })
 });
-export const { useGetEvidenceQuery, useSaveEvidenceMutation } = courtApi;
+
+export const { useGetCourtQuery, useSaveCourtMutation } = courtApi;
