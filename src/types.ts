@@ -21,6 +21,8 @@ export interface Objection {
   explanation: string;
   status: "待裁定" | "支持" | "驳回";
   createdAt: string;
+  /** 裁定时间，断网/回网合并时按最后裁定取值 */
+  resolvedAt?: number;
 }
 
 export interface TimelineEntry {
